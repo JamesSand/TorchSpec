@@ -49,7 +49,6 @@ from torchspec.models.draft.llama3_eagle import (
     LlamaYarnRotaryEmbedding,
     yarn_get_mscale,
 )
-from torchspec.models.draft.moe import DeepseekV3MoEBlock
 from torchspec.models.ops.flex_attention import (
     compile_friendly_flex_attention,
     eagle3_block_mask,
@@ -449,7 +448,7 @@ class DeepSeekMLAFlexAttention(DeepSeekMLAAttention):
 
 
 class DeepSeekDecoderLayer(nn.Module):
-    def __init__(self, config: DeepseekV3Config, attention_backend: str = "sdpa", ep_group=None):
+    def __init__(self, config: DeepseekV3Config, attention_backend: str = "sdpa"):
         super().__init__()
         self.hidden_size = config.hidden_size
 
@@ -465,14 +464,7 @@ class DeepSeekDecoderLayer(nn.Module):
             )
 
         self.attention_backend = attention_backend
-        # MoE draft (Kimi/DeepSeek): opt in via `use_moe: true` in the draft config.
-        # Falls back to the dense MLP otherwise (backward compatible — note HF's
-        # DeepseekV3Config sets a non-zero `n_routed_experts` default, so we gate
-        # on an explicit flag rather than on the presence of expert fields).
-        if getattr(config, "use_moe", False):
-            self.mlp = DeepseekV3MoEBlock(config)
-        else:
-            self.mlp = LlamaMLP(config)
+        self.mlp = LlamaMLP(config)
         self.hidden_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
