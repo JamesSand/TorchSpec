@@ -25,8 +25,10 @@ from typing import Union
 from transformers import AutoModelForCausalLM as AutoModelForCausalLMBase
 from transformers import LlamaConfig, PretrainedConfig, modeling_utils
 from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
+from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 
 from torchspec.models.draft.deepseek_eagle import Eagle3DeepseekV2ForCausalLM
+from torchspec.models.draft.deepseek_v4_nextn_eagle import Eagle3DeepseekV4ForCausalLM
 from torchspec.models.draft.dflash import DFlashConfig, DFlashDraftModel
 from torchspec.models.draft.llama3_eagle import LlamaForCausalLMEagle3
 from torchspec.utils.logging import logger
@@ -36,6 +38,7 @@ class AutoEagle3DraftModel(AutoModelForCausalLMBase):
     _model_mapping = {
         LlamaConfig: LlamaForCausalLMEagle3,
         DeepseekV3Config: Eagle3DeepseekV2ForCausalLM,
+        DeepseekV4Config: Eagle3DeepseekV4ForCausalLM,
         DFlashConfig: DFlashDraftModel,
     }
 
@@ -76,6 +79,7 @@ class AutoDraftModelConfig:
     _config_mapping = {
         "LlamaForCausalLMEagle3": LlamaConfig,
         "Eagle3DeepseekV2ForCausalLM": DeepseekV3Config,
+        "Eagle3DeepseekV4ForCausalLM": DeepseekV4Config,
         "DFlashDraftModel": DFlashConfig,
     }
 
