@@ -17,6 +17,7 @@ import torch
 from torchspec.models.dflash import (
     DFlashModel,
     _create_dflash_mask_mod,
+    _dpace_position_weights,
 )
 from torchspec.models.draft.dflash import (
     DFlashConfig,
@@ -53,7 +54,15 @@ def _make_config(
     )
 
 
-def _make_dflash_model(H=64, V=128, num_target_layers=2, block_size=4, num_anchors=4):
+def _make_dflash_model(
+    H=64,
+    V=128,
+    num_target_layers=2,
+    block_size=4,
+    num_anchors=4,
+    loss_objective="decay",
+    dpace_alpha=0.5,
+):
     """Helper to create a DFlashModel for testing."""
     config = _make_config(
         H=H,
@@ -70,6 +79,8 @@ def _make_dflash_model(H=64, V=128, num_target_layers=2, block_size=4, num_ancho
         draft_model=draft_model,
         block_size=block_size,
         num_anchors=num_anchors,
+        loss_objective=loss_objective,
+        dpace_alpha=dpace_alpha,
         loss_decay_gamma=7.0,
     )
 
@@ -515,6 +526,63 @@ class TestDFlashModelForward(unittest.TestCase):
         self.assertAlmostEqual(decay[0, 0, 2].item(), math.exp(-1.0 / 7.0), places=5)
         self.assertAlmostEqual(decay[0, 0, 15].item(), math.exp(-14.0 / 7.0), places=5)
 
+    def test_dpace_position_weights_match_formula(self):
+        confidences = torch.tensor([[[0.8, 0.5, 0.25]]], requires_grad=True)
+
+        weights = _dpace_position_weights(confidences, alpha=0.5)
+
+        expected = torch.tensor([[[1.996875, 1.096875, 0.421875]]])
+        torch.testing.assert_close(weights, expected)
+        self.assertFalse(weights.requires_grad)
+
+    def test_dpace_smoothing_keeps_later_weights_nonzero(self):
+        confidences = torch.tensor([[[0.0, 0.5, 0.25]]])
+
+        weights = _dpace_position_weights(confidences, alpha=0.5)
+
+        self.assertGreater(weights[0, 0, -1].item(), 0.0)
+
+    def test_invalid_dflash_loss_objective_raises(self):
+        with self.assertRaisesRegex(ValueError, "Unknown DFlash loss objective"):
+            _make_dflash_model(loss_objective="not-a-loss")
+
+    def test_invalid_dpace_alpha_raises(self):
+        with self.assertRaisesRegex(ValueError, "dflash_dpace_alpha"):
+            _make_dflash_model(loss_objective="dpace", dpace_alpha=1.5)
+
+    def test_dpace_loss_requires_grad(self):
+        """D-PACE should be differentiable through CE but not through dynamic weights."""
+        B, seq_len = 1, 32
+        input_ids = torch.randint(0, self.V, (B, seq_len))
+        hidden_states_list = [
+            torch.randn(B, seq_len, self.H) for _ in range(self.num_target_layers)
+        ]
+        loss_mask = torch.ones(B, seq_len)
+        lm_head_weight = torch.randn(self.V, self.H)
+        model = _make_dflash_model(
+            H=self.H,
+            V=self.V,
+            num_target_layers=self.num_target_layers,
+            block_size=4,
+            num_anchors=4,
+            loss_objective="dpace",
+        )
+
+        model.train()
+        loss, *_ = model(
+            input_ids=input_ids,
+            hidden_states_list=hidden_states_list,
+            loss_mask=loss_mask,
+            lm_head_weight=lm_head_weight,
+        )
+        loss.backward()
+
+        grad_found = any(
+            p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0
+            for p in model.draft_model.parameters()
+        )
+        self.assertTrue(grad_found, "No gradient flowed to draft model parameters")
+
     def test_label_alignment_same_position(self):
         """Labels at positions anchor+0..anchor+block_size-1 (same-position prediction)."""
         device = torch.device("cpu")
@@ -926,6 +994,8 @@ class TestDFlashTrainingConfig(unittest.TestCase):
         config = TrainingConfig()
         self.assertEqual(config.dflash_block_size, 16)
         self.assertEqual(config.dflash_num_anchors, 512)
+        self.assertEqual(config.dflash_loss_objective, "decay")
+        self.assertEqual(config.dflash_dpace_alpha, 0.5)
         self.assertEqual(config.dflash_loss_decay_gamma, 7.0)
         self.assertEqual(config.dflash_num_target_layers, 5)
 
@@ -937,16 +1007,21 @@ class TestDFlashTrainingConfig(unittest.TestCase):
         schema = OmegaConf.structured(Config)
         self.assertEqual(schema.training.dflash_block_size, 16)
         self.assertEqual(schema.training.dflash_num_target_layers, 5)
+        self.assertEqual(schema.training.dflash_loss_objective, "decay")
 
         overrides = OmegaConf.from_dotlist(
             [
                 "training.dflash_block_size=8",
                 "training.dflash_num_target_layers=3",
+                "training.dflash_loss_objective=dpace",
+                "training.dflash_dpace_alpha=0.3",
             ]
         )
         merged = OmegaConf.merge(schema, overrides)
         self.assertEqual(merged.training.dflash_block_size, 8)
         self.assertEqual(merged.training.dflash_num_target_layers, 3)
+        self.assertEqual(merged.training.dflash_loss_objective, "dpace")
+        self.assertAlmostEqual(merged.training.dflash_dpace_alpha, 0.3)
 
 
 class TestDFlashTrainingQuality(unittest.TestCase):
@@ -1189,6 +1264,8 @@ class TestDFlashConfigYAML(unittest.TestCase):
         self.assertEqual(config.training.dflash_block_size, 16)
         self.assertEqual(config.training.dflash_num_anchors, 512)
         self.assertEqual(config.training.dflash_num_target_layers, 5)
+        self.assertEqual(config.training.dflash_loss_objective, "decay")
+        self.assertAlmostEqual(config.training.dflash_dpace_alpha, 0.5)
         self.assertAlmostEqual(config.training.dflash_loss_decay_gamma, 7.0)
         self.assertEqual(
             config.model.draft_model_config,

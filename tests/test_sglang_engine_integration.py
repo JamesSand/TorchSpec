@@ -35,7 +35,7 @@ import torch  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Mooncake env setup (must happen before any sglang import)
+# Mooncake env setup
 # ---------------------------------------------------------------------------
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -286,12 +286,13 @@ def main():
     }
     torch.save(meta, dump_dir / "sglang_meta.pt")
 
-    # Import mooncake before creating sglang engine — sglang's subprocess
-    # forking can interfere with the import chain through torchspec.config.__init__
+    engine = create_engine(args.model, args.tp, aux_layer_ids)
+
+    # Import Mooncake after SGLang. In the CUDA 13 + mooncake-transfer-engine
+    # stack, importing mooncake.store before SGLang can segfault while torch's
+    # pybind dispatch bindings initialize.
     from torchspec.config.mooncake_config import MooncakeConfig
     from torchspec.transfer.mooncake.eagle_store import EagleMooncakeStore
-
-    engine = create_engine(args.model, args.tp, aux_layer_ids)
 
     mooncake_config = MooncakeConfig.from_env()
     mooncake_store = EagleMooncakeStore(mooncake_config)

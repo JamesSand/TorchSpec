@@ -17,7 +17,7 @@ DFlash is a block-diffusion draft model for speculative decoding. Unlike Eagle3'
 
 - **Standalone model**: DFlash does not inherit Eagle3DraftModel — the interfaces are fundamentally different (dual-source KV vs input fusion, block-parallel vs autoregressive).
 - **FlexAttention for block-causal mask**: Reuses TorchSpec's `compile_friendly_flex_attention` and `compile_friendly_create_block_mask` singletons.
-- **CE loss**: Cross-entropy against ground truth tokens (not KL divergence against target distribution like Eagle3).
+- **CE loss**: Cross-entropy against ground truth tokens (not KL divergence against target distribution like Eagle3). The default objective uses DFlash's static exponential position decay; `dflash_loss_objective: dpace` enables dynamic D-PACE position weights.
 - **Config-based trainer dispatch**: `TrainerActor.init()` resolves the draft config and uses `isinstance(config, DFlashConfig)` to select the trainer.
 - **Shared target model**: Reuses `Eagle3TargetModel` with generalized N-layer support. The same hook-based mechanism works for both 3 and 5 layers.
 
@@ -247,6 +247,7 @@ Trained on 800K PerfectBlend for 3 epochs with WSD (Warmup-Stable-Decay) LR sche
 | `warmup_ratio` | 0.04 |
 | `weight_decay` | 0.01 |
 | `draft_accumulation_steps` | 2 |
+| `dflash_loss_objective` | decay |
 | `dflash_loss_decay_gamma` | 7.0 |
 | `dflash_num_anchors` | 512 |
 
@@ -260,6 +261,8 @@ Trained on 800K PerfectBlend for 3 epochs with WSD (Warmup-Stable-Decay) LR sche
 |-----------|---------|-------------|
 | `dflash_block_size` | 16 | Tokens predicted per block |
 | `dflash_num_anchors` | 512 | Anchor positions per sequence (biggest speed lever) |
+| `dflash_loss_objective` | decay | Position-weighting objective: `decay` for static exponential decay, `dpace` for dynamic D-PACE weights |
+| `dflash_dpace_alpha` | 0.5 | D-PACE smoothing factor used only when computing dynamic position weights |
 | `dflash_loss_decay_gamma` | 7.0 | Exponential decay rate for position-wise loss weighting |
 | `dflash_num_target_layers` | 5 | Number of target model layers to project from |
 

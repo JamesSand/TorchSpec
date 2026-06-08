@@ -35,6 +35,23 @@ import torch.nn.functional as F
 from torchspec.models.ops.flex_attention import compile_friendly_create_block_mask
 from torchspec.utils.logging import logger
 
+_VALID_DFLASH_LOSS_OBJECTIVES = {"decay", "dpace"}
+
+
+def _dpace_position_weights(confidences: torch.Tensor, alpha: float) -> torch.Tensor:
+    """Compute detached D-PACE weights from per-position draft confidences."""
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"dflash_dpace_alpha must be in [0, 1], got {alpha}")
+
+    with torch.no_grad():
+        smoothed = (1.0 - alpha) * confidences.float() + alpha
+        prefix_products = torch.cumprod(smoothed, dim=-1)
+        weights = torch.flip(
+            torch.cumsum(torch.flip(prefix_products, dims=[-1]), dim=-1),
+            dims=[-1],
+        )
+        return weights.to(dtype=confidences.dtype)
+
 
 def _create_dflash_mask_mod(
     anchor_positions: torch.Tensor,
@@ -80,7 +97,7 @@ class DFlashModel(nn.Module):
       - Random anchor sampling with block_keep_mask
       - Block-causal attention mask via FlexAttention
       - Noise input construction (anchor + MASK)
-      - Cross-entropy loss with exponential decay weighting
+      - Cross-entropy loss with configurable position weighting
       - Per-position loss_mask application
     """
 
@@ -89,12 +106,25 @@ class DFlashModel(nn.Module):
         draft_model,
         block_size: int = 16,
         num_anchors: int = 512,
+        loss_objective: str = "decay",
+        dpace_alpha: float = 0.5,
         loss_decay_gamma: float = 7.0,
     ):
         super().__init__()
+        loss_objective = loss_objective.lower()
+        if loss_objective not in _VALID_DFLASH_LOSS_OBJECTIVES:
+            valid = ", ".join(sorted(_VALID_DFLASH_LOSS_OBJECTIVES))
+            raise ValueError(
+                f"Unknown DFlash loss objective {loss_objective!r}; expected one of {valid}"
+            )
+        if not 0.0 <= dpace_alpha <= 1.0:
+            raise ValueError(f"dflash_dpace_alpha must be in [0, 1], got {dpace_alpha}")
+
         self.draft_model = draft_model
         self.block_size = block_size
         self.num_anchors = num_anchors
+        self.loss_objective = loss_objective
+        self.dpace_alpha = dpace_alpha
         self.loss_decay_gamma = loss_decay_gamma
 
     def _sample_anchor_positions(
@@ -221,7 +251,7 @@ class DFlashModel(nn.Module):
         Matches SpecForge's OnlineDFlashModel.forward().
 
         Returns:
-            loss: scalar training loss (decay-weighted)
+            loss: scalar training loss (objective-weighted)
             accuracy: scalar accuracy (binary mask, no decay)
             loss_per_position: [block_size] mean loss at each within-block position
                 (index 0 is the anchor slot and always 0; indices 1..B-1 are the
@@ -316,24 +346,41 @@ class DFlashModel(nn.Module):
         )
         weight_mask = weight_mask * original_loss_mask_gathered
 
-        # Capture binary mask BEFORE applying decay weights. Accuracy measures
-        # "did we predict correctly?" uniformly across positions, while decay
+        # Capture binary mask BEFORE applying objective weights. Accuracy measures
+        # "did we predict correctly?" uniformly across positions, while weighting
         # only shapes gradient contribution. SpecForge uses no decay at all;
-        # our decay weighting is an addition to the training signal, not the metric.
+        # our objective weighting is an addition to the training signal, not the metric.
         binary_eval_mask = weight_mask.view(-1)
-
-        # Loss decay: exp(-(k-1)/γ) so k=1 (1st prediction) gets weight 1.0
-        if self.loss_decay_gamma is not None and self.loss_decay_gamma > 0:
-            k = torch.arange(self.block_size, device=device).view(1, 1, -1)
-            decay_weights = torch.exp(-(k - 1).clamp(min=0).float() / self.loss_decay_gamma)
-            weight_mask = weight_mask * decay_weights
 
         # 9. Cross entropy loss
         flat_logits = logits.view(-1, logits.size(-1))
         flat_targets = target_ids.view(-1)
-        flat_weights = weight_mask.view(-1)
-
         loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+        loss_per_token_by_position = loss_per_token.view(bsz, n_blocks, self.block_size)
+
+        objective_weights = weight_mask
+        if (
+            self.loss_objective == "decay"
+            and self.loss_decay_gamma is not None
+            and self.loss_decay_gamma > 0
+        ):
+            # Loss decay: exp(-(k-1)/γ) so k=1 (1st prediction) gets weight 1.0
+            k = torch.arange(self.block_size, device=device).view(1, 1, -1)
+            decay_weights = torch.exp(-(k - 1).clamp(min=0).float() / self.loss_decay_gamma)
+            objective_weights = weight_mask * decay_weights
+        elif self.loss_objective == "dpace":
+            dpace_weights = torch.ones_like(weight_mask)
+            if self.block_size > 1:
+                with torch.no_grad():
+                    target_confidences = torch.exp(-loss_per_token_by_position[..., 1:].float())
+                    dpace_pred_weights = _dpace_position_weights(
+                        target_confidences,
+                        self.dpace_alpha,
+                    ).to(dtype=weight_mask.dtype)
+                dpace_weights[..., 1:] = dpace_pred_weights
+            objective_weights = weight_mask * dpace_weights
+
+        flat_weights = objective_weights.view(-1)
         valid_token_count = flat_weights.sum().clamp(min=1e-6)
         loss = (loss_per_token * flat_weights).sum() / valid_token_count
 

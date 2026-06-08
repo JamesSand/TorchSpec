@@ -151,7 +151,9 @@ class TrainingConfig:
 
     # DFlash-specific parameters (ignored for Eagle3 training)
     dflash_block_size: int = 16
+    dflash_dpace_alpha: float = 0.5
     dflash_loss_decay_gamma: float = 7.0
+    dflash_loss_objective: str = "decay"  # "decay" or "dpace"
     dflash_num_anchors: int = 512
     dflash_num_target_layers: int = 5
 

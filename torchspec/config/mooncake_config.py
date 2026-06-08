@@ -21,6 +21,7 @@
 import os
 from dataclasses import dataclass
 from typing import Tuple
+from urllib.parse import urlparse
 
 from torchspec.transfer.mooncake.helpers import calculate_eagle3_buffer_size
 
@@ -203,8 +204,8 @@ class MooncakeConfig:
     def from_env(cls) -> "MooncakeConfig":
         """Create config from environment variables."""
         master_host = os.getenv("MOONCAKE_MASTER_HOST", "localhost")
-        master_port = os.getenv("MOONCAKE_MASTER_PORT", "50051")
-        metadata_port = os.getenv("MOONCAKE_METADATA_PORT", "8090")
+        master_port = cls._env_port("MOONCAKE_MASTER_PORT", "50051")
+        metadata_port = cls._env_port("MOONCAKE_METADATA_PORT", "8090")
         store_full_wait_seconds = float(os.getenv("MOONCAKE_STORE_FULL_WAIT_SECONDS", "0.5"))
         store_full_log_interval_seconds = float(
             os.getenv("MOONCAKE_STORE_FULL_LOG_INTERVAL_SECONDS", "5.0")
@@ -250,6 +251,14 @@ class MooncakeConfig:
             get_retry_max_wait_seconds=get_retry_max_wait_seconds,
             enable_hard_pin=os.getenv("MOONCAKE_ENABLE_HARD_PIN", "0") == "1",
         )
+
+    @staticmethod
+    def _env_port(name: str, default: str) -> str:
+        value = os.getenv(name, default)
+        parsed = urlparse(value)
+        if parsed.scheme and parsed.port is not None:
+            return str(parsed.port)
+        return value.rsplit(":", 1)[-1] if ":" in value else value
 
     @classmethod
     def from_master_address(
